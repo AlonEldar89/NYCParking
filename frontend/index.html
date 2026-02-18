@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cardboard Teacher Parking Finder</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1117; color: #e4e4e7; }
+  #map { width: 100%; height: 60vh; }
+  .header { padding: 16px 24px; background: #18181b; border-bottom: 1px solid #27272a; display: flex; align-items: center; gap: 16px; }
+  .header h1 { font-size: 1.25rem; font-weight: 600; }
+  .header .hint { font-size: 0.8rem; color: #71717a; }
+  #status { padding: 8px 24px; font-size: 0.8rem; color: #a1a1aa; background: #18181b; }
+  #results { padding: 12px 24px; max-height: 35vh; overflow-y: auto; }
+  .card { background: #1e1e24; border: 1px solid #27272a; border-radius: 10px; padding: 14px 18px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: border-color 0.15s; }
+  .card:hover { border-color: #4ade80; }
+  .card .street { font-weight: 600; font-size: 0.95rem; }
+  .card .detail { font-size: 0.78rem; color: #a1a1aa; margin-top: 2px; }
+  .badge { font-size: 0.85rem; font-weight: 700; padding: 6px 14px; border-radius: 20px; white-space: nowrap; }
+  .badge.d5 { background: #064e3b; color: #6ee7b7; }
+  .badge.d4 { background: #065f46; color: #86efac; }
+  .badge.d3 { background: #854d0e; color: #fde68a; }
+  .badge.d2 { background: #92400e; color: #fed7aa; }
+  .badge.d1 { background: #9a3412; color: #fdba74; }
+  .badge.d0 { background: #7f1d1d; color: #fca5a5; }
+  .loading { text-align: center; padding: 40px; color: #71717a; }
+  .legend { position: absolute; bottom: 24px; right: 24px; background: #18181bee; border: 1px solid #27272a; border-radius: 10px; padding: 12px 16px; z-index: 1000; font-size: 0.78rem; }
+  .legend-title { font-weight: 600; margin-bottom: 8px; font-size: 0.82rem; }
+  .legend-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .legend-line { width: 28px; height: 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Cardboard Teacher Parking Finder</h1>
+  <span class="hint">Click anywhere on the map to find streets with the most time until the next street cleaning</span>
+</div>
+<div id="map">
+  <div class="legend">
+    <div class="legend-title">Time until cleaning</div>
+    <div class="legend-row"><div class="legend-line" style="background:#22c55e"></div> 5+ days</div>
+    <div class="legend-row"><div class="legend-line" style="background:#4ade80"></div> 4 days</div>
+    <div class="legend-row"><div class="legend-line" style="background:#eab308"></div> 3 days</div>
+    <div class="legend-row"><div class="legend-line" style="background:#f59e0b"></div> 2 days</div>
+    <div class="legend-row"><div class="legend-line" style="background:#f97316"></div> 1 day</div>
+    <div class="legend-row"><div class="legend-line" style="background:#ef4444"></div> &lt; 1 day</div>
+  </div>
+</div>
+<div id="status"></div>
+<div id="results"><div class="loading">Click on the map to get started</div></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map = L.map('map').setView([40.6390, -73.9686], 16);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; OpenStreetMap &copy; CARTO',
+  maxZoom: 19,
+}).addTo(map);
+
+let markers = L.layerGroup().addTo(map);
+let clickMarker = null;
+
+const TIERS = [
+  { min: 120, color: '#22c55e', badge: 'd5', label: '5d+' },
+  { min:  96, color: '#4ade80', badge: 'd4', label: '4d'  },
+  { min:  72, color: '#eab308', badge: 'd3', label: '3d'  },
+  { min:  48, color: '#f59e0b', badge: 'd2', label: '2d'  },
+  { min:  24, color: '#f97316', badge: 'd1', label: '1d'  },
+  { min:   0, color: '#ef4444', badge: 'd0', label: '<1d' },
+];
+
+function getTier(hours) {
+  return TIERS.find(t => hours >= t.min) || TIERS[TIERS.length - 1];
+}
+
+function formatHours(h) {
+  if (h === 0) return 'NOW';
+  if (h < 1) return Math.round(h * 60) + 'm';
+  if (h < 24) return Math.round(h) + 'h';
+  const d = Math.floor(h / 24);
+  const rem = Math.round(h % 24);
+  return d + 'd ' + rem + 'h';
+}
+
+async function search(lat, lng) {
+  const status = document.getElementById('status');
+  const results = document.getElementById('results');
+  status.textContent = 'Searching nearby streets...';
+  results.innerHTML = '<div class="loading">Loading...</div>';
+
+  try {
+    const resp = await fetch(`/api/streets?lat=${lat}&lng=${lng}&radius_km=${WALK_7MIN_KM}`);
+    const data = await resp.json();
+    status.textContent = `Found ${data.length} street segments nearby`;
+
+    markers.clearLayers();
+    results.innerHTML = '';
+
+    if (data.length === 0) {
+      results.innerHTML = '<div class="loading">No street cleaning signs found in this area. Try clicking elsewhere.</div>';
+      return;
+    }
+
+    data.forEach((s) => {
+      const tier = getTier(s.hours_until_cleaning);
+      const bc = tier.badge;
+      const color = tier.color;
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `
+        <div>
+          <div class="street">${s.on_street}</div>
+          <div class="detail">${s.from_street} to ${s.to_street} &middot; ${s.side} side &middot; ${s.borough}</div>
+          <div class="detail">${s.description.replace('(SANITATION BROOM SYMBOL) ', '')}</div>
+        </div>
+        <div class="badge ${bc}">${formatHours(s.hours_until_cleaning)}</div>
+      `;
+      const midLat = (s.start[0] + s.end[0]) / 2;
+      const midLng = (s.start[1] + s.end[1]) / 2;
+      card.addEventListener('click', () => map.flyTo([midLat, midLng], 17));
+      results.appendChild(card);
+
+      const line = L.polyline([s.start, s.end], {
+        color: color,
+        weight: 6,
+        opacity: 0.85,
+        lineCap: 'round',
+      });
+      line.bindPopup(`<b>${s.on_street}</b><br>${s.from_street} → ${s.to_street}<br>${formatHours(s.hours_until_cleaning)} until cleaning`);
+      markers.addLayer(line);
+    });
+  } catch (err) {
+    status.textContent = 'Error fetching data — is the backend running?';
+    results.innerHTML = `<div class="loading">${err.message}</div>`;
+  }
+}
+
+const HOME = [40.6390, -73.9686];
+const WALK_7MIN_KM = 0.56;
+
+map.on('click', (e) => {
+  const { lat, lng } = e.latlng;
+  if (clickMarker) map.removeLayer(clickMarker);
+  clickMarker = L.marker([lat, lng]).addTo(map);
+  search(lat, lng);
+});
+
+search(HOME[0], HOME[1]);
+</script>
+</body>
+</html>
